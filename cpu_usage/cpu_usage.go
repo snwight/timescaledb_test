@@ -13,11 +13,6 @@ import (
 )
 
 func main() {
-	file, err := os.Open("../query_params.csv")
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	conn, err := pgx.Connect(context.Background(), "postgres://postgres:password@localhost:5432/homework")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
@@ -25,7 +20,15 @@ func main() {
 	}
 	defer conn.Close(context.Background())
 
+	file, err := os.Open("../query_params.csv")
+	if err != nil {
+		log.Fatal(err)
+	}
 	parser := csv.NewReader(file)
+
+	var host string
+	var ts time.Time
+	var usage float64
 
 	skip := true
 	for {
@@ -41,23 +44,10 @@ func main() {
 			continue
 		}
 
-		fmt.Println("Querying: ", record)
+		start := record[1]
+		end := record[2]
 
-		var host string
-		var ts time.Time
-		var usage float64
-
-		start, err := time.Parse("2006-1-2 15:04:05", "2017-01-01 00:03:40")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "timeParse failed: %v\n", err)
-			os.Exit(1)
-		}
-
-		end, err := time.Parse("2006-1-2 15:04:05", "2017-01-01 00:04:40")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "timeParse failed: %v\n", err)
-			os.Exit(1)
-		}
+		fmt.Printf("Querying, host: %s, start: %v, end %v\n", record[0], start, end)
 
 		err = conn.QueryRow(context.Background(), "select host, ts, usage from cpu_usage where ts between $1 and $2", start, end).Scan(&host, &ts, &usage)
 		if err != nil {
@@ -65,8 +55,10 @@ func main() {
 			os.Exit(1)
 		}
 
-		fmt.Println("Result: ", host, ts, usage)
+		fmt.Printf("Result, host %s, ts %v, usage %%%v\n", host, ts, usage)
 
 	}
+
+	os.Exit(0)
 
 }
