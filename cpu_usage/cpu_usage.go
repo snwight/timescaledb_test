@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	pgx "github.com/jackc/pgx/v5"
+	pgxpool "github.com/jackc/pgx/v5/pgxpool"
 )
 
 /*
@@ -24,13 +24,20 @@ every minute in the time range specified by the start time and end time
 - the average query time,
 - and the maximum query time.
 */
+
+type QueryStats struct {
+	queryTime int64
+	minCpu    float64
+	maxCpu    float64
+}
+
 func main() {
-	conn, err := pgx.Connect(context.Background(), "postgres://postgres:password@localhost:5432/homework")
+	pool, err := pgxpool.New(context.Background(), "postgres://postgres:password@localhost:5432/homework")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close(context.Background())
+	defer pool.Close()
 
 	file, err := os.Open("../query_params.csv")
 	if err != nil {
@@ -42,8 +49,8 @@ func main() {
 	// hostChannelMap := make(map[string]chan ([]string)) // send query params to NumWorkers goroutines
 	// completionChannel := make(chan (QueryResult))      // receive query results from NumWorkers goroutines
 
+	var queryStats []QueryStats
 	var totalQueries int64
-	var queryTimes []int64
 
 	startTime := time.Now()
 	skip := true // One-time boolean flag to skip guaranteed header row in CSV
@@ -60,65 +67,35 @@ func main() {
 			continue
 		}
 
-		// Fragile but we are guaranteed input format consistency in this case
-		targetHost := row[0]
-		start := row[1]
-		end := row[2]
-
-		// FIXME: Dispatch queries to host-adjacent goroutine here
-
-		// fmt.Printf("Querying, host: %s, start: %v, end %v\n", targetHost, start, end)
-
-		queryStartTime := time.Now()
-		rows, err := conn.Query(context.Background(), "select host, ts, usage from cpu_usage where host = $1 and ts between $2 and $3", targetHost, start, end)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "QueryRow failed: %v\n", err)
-			os.Exit(1)
-		}
-		queryTimes = append(queryTimes, time.Since(queryStartTime).Nanoseconds())
 		totalQueries++
 
-		defer rows.Close()
-
-		// Iterate over the sample time window we just requested
-		maxCpu := float64(0.0)
-		minCpu := float64(100.0)
-
-		var host string
-		var ts time.Time
-		var usage float64
-
-		var rowCount int
-		for rows.Next() {
-			rowCount++
-
-			err = rows.Scan(&host, &ts, &usage)
-			if err != nil {
-				fmt.Printf("Scan error: %v", err)
-				return
-			}
-
-			// Determine floor and ceiling of CPU usage range
-			if usage < minCpu {
-				minCpu = usage
-			}
-			if usage > maxCpu {
-				maxCpu = usage
-			}
-
-			// fmt.Printf("Result, host %s, ts %v, usage %%%v, rowCount %d\n", host, ts, usage, rowCount)
-
-		}
-
-		// fmt.Printf("Window on host %s: rows %d, minCpu %%%v, maxCpu %%%v, qt len %d\n", host, rowCount, minCpu, maxCpu, len(queryTimes))
+		// FIXME: Dispatch queries to host-adjacent goroutine here
+		queryStats = append(queryStats, processQuery(pool, row))
 
 	}
+
+	// Collection and sync point for query duration slices
+	/*
+		select {}
+	*/
+
 	totalProcessTime := time.Since(startTime)
 
 	// Taking names and kicking ass
 	var totalQueryTimeInt int64
-	for _, t := range queryTimes {
-		totalQueryTimeInt += t
+	var minCpu float64 = 100
+	var maxCpu float64
+	var queryTimes []int64
+
+	for _, qs := range queryStats {
+		totalQueryTimeInt += qs.queryTime
+		queryTimes = append(queryTimes, qs.queryTime)
+		if qs.minCpu < minCpu {
+			minCpu = qs.minCpu
+		}
+		if qs.maxCpu > maxCpu {
+			maxCpu = qs.maxCpu
+		}
 	}
 
 	avgQueryTime := time.Duration(totalQueryTimeInt / totalQueries)
@@ -137,5 +114,55 @@ func main() {
 	fmt.Printf("totalProcessTime %v\ntotalQueryTime %v\nminQueryTime %v\nmaxQueryTime %v\nmedianQueryTime %v\navgQueryTime %v\n", totalProcessTime, totalQueryTime, minQueryTime, maxQueryTime, medianQueryTime, avgQueryTime)
 
 	os.Exit(0)
+
+}
+
+func processQuery(pool *pgxpool.Pool, row []string) QueryStats {
+
+	// Fragile but we are guaranteed input format consistency in this case
+	targetHost := row[0]
+	start := row[1]
+	end := row[2]
+	// fmt.Printf("Querying, host: %s, start: %v, end %v\n", targetHost, start, end)
+
+	queryStartTime := time.Now()
+	rows, err := pool.Query(context.Background(), "select ts, usage from cpu_usage where host = $1 and ts between $2 and $3", targetHost, start, end)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "QueryRow failed: %v\n", err)
+		os.Exit(1)
+	}
+	queryTime := time.Since(queryStartTime).Nanoseconds()
+
+	defer rows.Close()
+
+	var ts time.Time
+	var usage float64
+	maxCpu := float64(0.0)
+	minCpu := float64(100.0)
+
+	for rows.Next() {
+		err = rows.Scan(&ts, &usage)
+		if err != nil {
+			fmt.Printf("Scan error: %v", err)
+			os.Exit(1)
+		}
+
+		// Determine floor and ceiling of CPU usage range
+		if usage < minCpu {
+			minCpu = usage
+		}
+		if usage > maxCpu {
+			maxCpu = usage
+		}
+
+		// fmt.Printf("Result, host %s, ts %v, usage %%%v, rowCount %d\n", host, ts, usage, rowCount)
+	}
+
+	// Returned values
+	return QueryStats{
+		queryTime: queryTime,
+		minCpu:    minCpu,
+		maxCpu:    maxCpu,
+	}
 
 }
