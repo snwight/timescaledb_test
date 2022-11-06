@@ -33,38 +33,41 @@ type QueryStats struct {
 }
 
 type QueryStatReport struct {
-	totalProcessTime time.Duration
-	totalQueryTime   time.Duration
-	minQueryTime     time.Duration
-	maxQueryTime     time.Duration
-	medianQueryTime  time.Duration
-	avgQueryTime     time.Duration
+	totalQueryTime  time.Duration
+	minQueryTime    time.Duration
+	maxQueryTime    time.Duration
+	medianQueryTime time.Duration
+	avgQueryTime    time.Duration
 }
 
 func main() {
-	pool, err := pgxpool.New(context.Background(), "postgres://postgres:password@localhost:5432/homework")
+
+	file, err := os.Open("query_params.csv")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	parser := csv.NewReader(file)
+
+	pool, err := pgxpool.New(context.Background(), "postgres://postgres:password@db:5432/homework")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
-
-	file, err := os.Open("../query_params.csv")
-	if err != nil {
-		log.Fatal(err)
-	}
-	parser := csv.NewReader(file)
-
-	// FIXME parse from cmd line
 	numWorkers := 5
 
-	// Dispatch and collection channel
+	// These are our result channels
 	completionChannel := make(chan (QueryStats)) // receive query results from NumWorkers goroutines
 	terminationChannel := make(chan bool)
 	reportChan := make(chan QueryStatReport)
+
+	// This will be the connective tissue we use to coordinate query worker go funcs
 	hostChannelMap := spawnWorkers(pool, numWorkers, completionChannel, terminationChannel)
 
 	// Completed tasks will be aggregated in this waiting processs
 	go completionTasks(time.Now(), completionChannel, terminationChannel, reportChan, numWorkers)
+
+	startTime := time.Now()
 
 	skip := true // One-time boolean flag to skip guaranteed header row in CSV
 	for {        // Iterate over CSV contents to EOF
@@ -92,9 +95,11 @@ func main() {
 	}
 
 	// Await final report from completionTasks
+	totalRunTime := time.Since(startTime)
 	queryReport := <-reportChan
-	fmt.Printf("totalProcessTime %v\ntotalQueryTime %v\nminQueryTime %v\nmaxQueryTime %v\nmedianQueryTime %v\navgQueryTime %v\n",
-		queryReport.totalProcessTime, queryReport.totalQueryTime, queryReport.minQueryTime, queryReport.maxQueryTime, queryReport.medianQueryTime, queryReport.avgQueryTime)
+
+	fmt.Printf("\n\ntotalRunTime %v\ntotalQueryTime %v\nminQueryTime %v\nmaxQueryTime %v\nmedianQueryTime %v\navgQueryTime %v\n\n\n",
+		totalRunTime, queryReport.totalQueryTime, queryReport.minQueryTime, queryReport.maxQueryTime, queryReport.medianQueryTime, queryReport.avgQueryTime)
 
 }
 
@@ -114,6 +119,7 @@ func spawnWorkers(pool *pgxpool.Pool, numWorkers int, completionChannel chan (Qu
 			for {
 
 				csvRow := <-parameterChannel
+
 				// A nil packet is our termination flag, we forward the msg to originator and kill this goroutine
 				if csvRow == nil {
 					terminationChannel <- true
@@ -223,7 +229,7 @@ func completionTasks(startTime time.Time, completionChannel chan (QueryStats), t
 			}
 
 		case <-terminationChannel:
-
+			// This channel is our implicit synchronization channel - workers come here to die
 			liveWorkers--
 			if liveWorkers == 0 {
 				stop = true
@@ -237,7 +243,6 @@ func completionTasks(startTime time.Time, completionChannel chan (QueryStats), t
 
 	}
 
-	totalProcessTime := time.Since(startTime)
 	avgQueryTime := time.Duration(totalQueryTimeInt / totalQueries)
 	totalQueryTime := time.Duration(totalQueryTimeInt)
 
@@ -250,13 +255,14 @@ func completionTasks(startTime time.Time, completionChannel chan (QueryStats), t
 	maxQueryTime := time.Duration(queryTimes[totalQueries-1])
 
 	queryStatReport := QueryStatReport{
-		totalProcessTime,
 		totalQueryTime,
 		minQueryTime,
 		maxQueryTime,
 		medianQueryTime,
 		avgQueryTime,
 	}
+
+	// Notify the waiting citizenry back on Earth that we have aggregated times to report
 	reportChan <- queryStatReport
 
 }

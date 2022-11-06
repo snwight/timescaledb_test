@@ -1,0 +1,27 @@
+services:
+  db:
+    image: timescale/timescaledb-ha:pg14-latest
+    ports:
+      - '5432:5432'
+    volumes:
+      # stage our test data
+      - ./data/cpu_usage.csv:/var/lib/postgresql/data/cpu_usage.csv
+      # copy the sql script to create tables
+      - ./sql/cpu_usage.sql:/docker-entrypoint-initdb.d/cpu_usage.sql
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+  cpu_usage:
+    image: cpu-usage-img
+    build: 
+      dockerfile: Dockerfile
+    command: ["./wait-for-it/wait-for-it.sh", "db:5432", "--", "./cpu_usage"]
+    volumes:
+      - /data
+    environment:
+      - POSTGRES_NAME=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    depends_on:
+      - db
